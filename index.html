@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>CupydJS PoC</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width">
+        <style>
+            body{margin: 0}
+            canvas{position: absolute;cursor: crosshair}
+        </style>
+        <script src="bitmapHelpers.js"></script>
+        <script src="mouseActions.js"></script>
+        <script>
+            var props={
+                tech:{
+                    xdim: 512,
+                    ydim: 1024,
+                    zdim: 512,
+                    maxlevel: 4
+                },
+                voltrf:{
+                    width: 512,
+                    height: 512,
+                    depth: 1024,
+                    O:[0,1023,511],
+                    R:[1,0,0],
+                    I:[0,0,-1],
+                    P:[0,-1,0]
+                },
+                mods:[
+                    {
+                        name:"MRI",
+                        type:"grayimage",
+                        urlformatter: '"MRI/"+l+"/"+z+"/"+y+"/"+x+".jpg"'
+                    },
+                    {
+                        name:"DTI",
+                        type:"colorimage",
+                        urlformatter: '"DTI/"+l+"/"+z+"/"+y+"/"+x+".jpg"'
+                    }
+                ]
+            };
+
+            var volprops;
+            
+//            var techprops = {
+//                xdim: 6572,
+//                ydim: 7404,
+//                zdim: 5711,
+//                maxlevel: 5,
+//                type: "graypng",
+//                urlformatter: '"https://neuroglancer.humanbrainproject.org/precomputed/BigBrainRelease.2015/8bit/"\
+//                        +(20<<l)+"um/"+(x*64)+"-"+(x*64+64)+"/"+(y*64)+"-"+(y*64+64)+"/"+(z*64)+"-"+(z*64+64)'
+//            };
+//            var volprops = {
+//                width: 6572,
+//                height: 7404,
+//                depth: 5711,
+//                O:[0,0,0],
+//                R:[1,0,0],
+//                I:[0,1,0],
+//                P:[0,0,1]
+//            };
+
+            function vec2crd(org,vec){
+                return {
+                    x:org.x+vec.x,
+                    y:org.y+vec.y,
+                    z:org.z+vec.z
+                };
+            }
+            function crd2vec(org,crd){
+                return {
+                    x:crd.x-org.x,
+                    y:crd.y-org.y,
+                    z:crd.z-org.z
+                };
+            }
+            function crd2tech(crd){
+                return {
+                    x:volprops.O[0]+crd.x*volprops.R[0]+crd.y*volprops.I[0]+crd.z*volprops.P[0],
+                    y:volprops.O[1]+crd.x*volprops.R[1]+crd.y*volprops.I[1]+crd.z*volprops.P[1],
+                    z:volprops.O[2]+crd.x*volprops.R[2]+crd.y*volprops.I[2]+crd.z*volprops.P[2]
+                };
+            }
+            function vec2tech(vec){
+                return {
+                    x:vec.x*volprops.R[0]+vec.y*volprops.I[0]+vec.z*volprops.P[0],
+                    y:vec.x*volprops.R[1]+vec.y*volprops.I[1]+vec.z*volprops.P[1],
+                    z:vec.x*volprops.R[2]+vec.y*volprops.I[2]+vec.z*volprops.P[2]
+                };
+            }
+            
+            var cut={};
+            
+            var viewsets={};
+            var activeviews;
+            var views={};
+            function View(id,ctx,worker,handler){
+                this.id=id;
+                this.ctx=ctx;
+                this.worker=worker;
+                this.active=false;
+                this.curr=null;
+                this.next=null;
+                this.putdata=handler;
+                var cnv=ctx.canvas;
+                this.width=Math.floor(cnv.width);
+                this.height=Math.floor(cnv.height);
+                worker.postMessage({opcode:"registerview",view:{id:id,width:this.width,height:this.height}});
+                this.imagedata=ctx.createImageData(this.width,this.height);
+                for(var i=0;i<this.imagedata.data.length;i++)
+                    this.imagedata.data[i]=255;
+            }
+            function View2x(id,ctx,worker,handler){
+                this.id=id;
+                this.ctx=ctx;
+                this.worker=worker;
+                this.active=false;
+                this.curr=null;
+                this.next=null;
+                this.putdata=handler;
+                var cnv=ctx.canvas;
+                this.width=Math.floor(cnv.width/2);
+                this.height=Math.floor(cnv.height/2);
+                worker.postMessage({opcode:"registerview",view:{id:id,width:this.width,height:this.height}});
+                this.imagedata=ctx.createImageData(this.width*2,this.height*2);
+                for(var i=0;i<this.imagedata.data.length;i++)
+                    this.imagedata.data[i]=255;
+            }
+
+            function tryDispatch(id){
+                var cx=views[id];
+                if(cx.curr===null && cx.next!==null){
+                    cx.curr=cx.next;
+                    cx.next=null;
+                    cx.worker.postMessage({
+                        opcode:"draw",
+                        id:id,
+                        cut:cx.curr
+                    });
+                }
+            }
+            
+            var sq;
+            var dsq;
+            
+            var sovly,covly,hovly;
+            
+            function ovly(){
+                function draw(canvas,xsel,ysel,drag,rot){
+                    var ctx=canvas.getContext("2d");
+                    ctx.clearRect(0,0,canvas.width,canvas.height);
+                    
+                    if(rot){
+                        ctx.fillStyle="#FF0000";
+                        ctx.beginPath();
+                        ctx.arc(cur[xsel],cur[ysel],10,0,Math.PI*2);
+                        ctx.fill();
+                    }
+
+                    ctx.fillStyle=rot?"rgba(255,255,0,0.25)":"rgba(0,0,255,0.25)";
+                    ctx.strokeStyle=rot?"#FFFF00":"#000";
+                    ctx.beginPath();
+                    ctx.moveTo(cur[xsel]-cut["u"+xsel]*cut.w/2*sq/dsq-cut["v"+xsel]*cut.h/2*sq/dsq,
+                               cur[ysel]-cut["u"+ysel]*cut.w/2*sq/dsq-cut["v"+ysel]*cut.h/2*sq/dsq);
+                    ctx.lineTo(cur[xsel]+cut["u"+xsel]*cut.w/2*sq/dsq-cut["v"+xsel]*cut.h/2*sq/dsq,
+                               cur[ysel]+cut["u"+ysel]*cut.w/2*sq/dsq-cut["v"+ysel]*cut.h/2*sq/dsq);
+                    ctx.lineTo(cur[xsel]+cut["u"+xsel]*cut.w/2*sq/dsq+cut["v"+xsel]*cut.h/2*sq/dsq,
+                               cur[ysel]+cut["u"+ysel]*cut.w/2*sq/dsq+cut["v"+ysel]*cut.h/2*sq/dsq);
+                    ctx.lineTo(cur[xsel]-cut["u"+xsel]*cut.w/2*sq/dsq+cut["v"+xsel]*cut.h/2*sq/dsq,
+                               cur[ysel]-cut["u"+ysel]*cut.w/2*sq/dsq+cut["v"+ysel]*cut.h/2*sq/dsq);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+//                    if(rot){
+                        ctx.strokeStyle="#FF0000";
+                        ctx.beginPath();
+                        ctx.moveTo(cur[xsel],cur[ysel]);
+                        ctx.lineTo(cur[xsel]+30*cut["u"+xsel],cur[ysel]+30*cut["u"+ysel]);
+                        ctx.stroke();
+                        ctx.strokeStyle="#00FF00";
+                        ctx.beginPath();
+                        ctx.moveTo(cur[xsel],cur[ysel]);
+                        ctx.lineTo(cur[xsel]+30*cut["v"+xsel],cur[ysel]+30*cut["v"+ysel]);
+                        ctx.stroke();
+//                    }
+                    
+                    if(!rot){
+                        ctx.fillStyle=drag?"#FFFF00":"#FF0000";
+                        ctx.beginPath();
+                        ctx.arc(cur[xsel],cur[ysel],10,0,Math.PI*2);
+                        ctx.fill();
+                    }
+                }
+                draw(sovly,"z","y",sdrag,srot);
+                draw(covly,"x","y",cdrag,crot);
+                draw(hovly,"x","z",hdrag,hrot);
+            }
+            
+            function redrawall(){
+                ovly();
+
+                var o=crd2tech({x:(volprops.width-dsq)/2,y:(volprops.height-dsq)/2,z:cut.cz});
+                var u=vec2tech({x:dsq,y:0,z:0});
+                var v=vec2tech({x:0,y:dsq,z:0});
+                activeviews.coronal.next={
+                    ox:o.x,oy:o.y,oz:o.z,
+                    ux:u.x,uy:u.y,uz:u.z,
+                    vx:v.x,vy:v.y,vz:v.z
+                };
+                tryDispatch(activeviews.coronal.id);
+                
+                o=crd2tech({x:cut.cx,y:(volprops.height-dsq)/2,z:(volprops.depth-dsq)/2});
+                u=vec2tech({x:0,y:0,z:dsq});
+                v=vec2tech({x:0,y:dsq,z:0});
+                activeviews.sagittal.next={
+                    ox:o.x,oy:o.y,oz:o.z,
+                    ux:u.x,uy:u.y,uz:u.z,
+                    vx:v.x,vy:v.y,vz:v.z
+                };
+                tryDispatch(activeviews.sagittal.id);
+                
+                o=crd2tech({x:(volprops.width-dsq)/2,y:cut.cy,z:(volprops.depth-dsq)/2});
+                u=vec2tech({x:dsq,y:0,z:0});
+                v=vec2tech({x:0,y:0,z:dsq});
+                activeviews.horizontal.next={
+                    ox:o.x,oy:o.y,oz:o.z,
+                    ux:u.x,uy:u.y,uz:u.z,
+                    vx:v.x,vy:v.y,vz:v.z
+                };
+                tryDispatch(activeviews.horizontal.id);
+
+                o=crd2tech({
+                    x:cut.cx-cut.ux*cut.w/2-cut.vx*cut.h/2,
+                    y:cut.cy-cut.uy*cut.w/2-cut.vy*cut.h/2,
+                    z:cut.cz-cut.uz*cut.w/2-cut.vz*cut.h/2
+                });
+                u=vec2tech({
+                    x:cut.ux*cut.w,
+                    y:cut.uy*cut.w,
+                    z:cut.uz*cut.w
+                });
+                v=vec2tech({
+                    x:cut.vx*cut.h,
+                    y:cut.vy*cut.h,
+                    z:cut.vz*cut.h
+                });
+                activeviews.main.next={
+                    ox:o.x,oy:o.y,oz:o.z,
+                    ux:u.x,uy:u.y,uz:u.z,
+                    vx:v.x,vy:v.y,vz:v.z
+                };
+                tryDispatch(activeviews.main.id);
+            }
+
+            function startup(){
+                volprops=props.voltrf;
+                
+                var main=document.getElementById("main");
+                var t=main.offsetTop;
+                var h=Math.floor((window.innerHeight-t)/6)*2;
+                sq=h;
+                dsq=Math.max(volprops.width,volprops.height,volprops.depth);
+                var w=Math.floor(window.innerWidth/2)*2-h;
+                main.width=w;
+                main.height=h*3;
+                var sagittal=document.getElementById("sagittal");
+                var coronal=document.getElementById("coronal");
+                var horizontal=document.getElementById("horizontal");
+                /*var*/ sovly=document.getElementById("sovly");
+                /*var*/ covly=document.getElementById("covly");
+                /*var*/ hovly=document.getElementById("hovly");
+                sagittal.width=coronal.width=horizontal.width=sagittal.height=coronal.height=horizontal.height=h;
+                sovly.width=covly.width=hovly.width=sovly.height=covly.height=hovly.height=h;
+                sagittal.style.left=coronal.style.left=horizontal.style.left=w+"px";
+                sovly.style.left=covly.style.left=hovly.style.left=w+"px";
+                
+                coronal.style.top=h+t+"px";
+                covly.style.top=h+t+"px";
+                horizontal.style.top=h*2+t+"px";
+                hovly.style.top=h*2+t+"px";
+                
+                function test(canvas,fill){
+                    var ctx=canvas.getContext("2d");
+                    ctx.fillStyle=fill;
+                    ctx.fillRect(0,0,canvas.width,canvas.height);
+                }
+                test(main,"#c0c0c0");
+                test(sagittal,"#ff0000");
+                test(coronal,"#00ff00");
+                test(horizontal,"#0000ff");
+
+                cut={
+                    cx:volprops.width/2,
+                    cy:volprops.height/2,
+                    cz:volprops.depth/2,
+                    ux:1,uy:0,uz:0,
+                    vx:0,vy:1,vz:0,
+                    w:volprops.height*main.width/main.height,h:volprops.height
+                };
+                if(cut.w<volprops.width){
+                    cut.w=volprops.width;
+                    cut.h=volprops.width*main.height/main.width;
+                }
+                
+                var techprops=props.tech;
+
+                var droplist=document.getElementById("mods");
+                
+                var magix={
+                    grayimage:{
+                        worker:"worker8i.js",
+                        data1x:putgraydata1x,
+                        data2x:putgraydata2x
+                    },
+                    colorimage:{
+                        worker:"worker24i.js",
+                        data1x:putcolordata1x,
+                        data2x:putcolordata2x
+                    }
+                };
+
+                props.mods.forEach(function(mod){
+                    var opt=document.createElement("option");
+                    opt.text=mod.name;
+                    droplist.appendChild(opt);
+                    
+                    var magic=magix[mod.type];
+                    
+                    var worker=new Worker(magic.worker);
+                    worker.onmessage=function(event){
+                        var id=event.data.id;
+                        if(id==='imgload'){
+                            var img=document.createElement("img");
+                            img.onload=function(loadevent){cubeloaded(loadevent,worker,event.data.type);};
+        //                    img.onerror=function(){
+        //                        console.log("Invalid tile: "+x+","+y+ " "+url);
+        //                        cubecomplete(null,null,next);
+        //                    };
+                            img.src=event.data.url;
+                        }else{
+                            var view=views[id];
+                            view.curr=null;
+                            tryDispatch(id);
+                            if(view.active)view.putdata(view,event.data.view,0,255);
+                        }
+                    };
+                    techprops.urlformatter=mod.urlformatter;
+                    worker.postMessage({opcode:"dataprops",props:techprops});
+
+                    var sview=new View(mod.name+'sagittal',sagittal.getContext("2d"),worker,magic.data1x);
+                    var cview=new View(mod.name+'coronal',coronal.getContext("2d"),worker,magic.data1x);
+                    var hview=new View(mod.name+'horizontal',horizontal.getContext("2d"),worker,magic.data1x);
+                    var mview=new View2x(mod.name+'main',main.getContext("2d"),worker,magic.data2x);
+                    
+                    views[sview.id]=sview;
+                    views[cview.id]=cview;
+                    views[hview.id]=hview;
+                    views[mview.id]=mview;
+                    
+                    viewsets[mod.name]={
+                        sagittal:sview,
+                        coronal:cview,
+                        horizontal:hview,
+                        main:mview
+                    };
+                    
+                    if(!activeviews){
+                        activeviews=viewsets[mod.name];
+                        sview.active=cview.active=hview.active=mview.active=true;
+                    }
+                });
+                
+                cut2cur();
+                redrawall();
+
+                sovly.addEventListener("mousedown",sdown,true);
+                sovly.addEventListener("mousemove",smove,true);
+                sovly.addEventListener("mouseup",sup,true);
+                sovly.addEventListener("mouseout",sup,true);
+                covly.addEventListener("mousedown",cdown,true);
+                covly.addEventListener("mousemove",cmove,true);
+                covly.addEventListener("mouseup",cup,true);
+                covly.addEventListener("mouseout",cup,true);
+                hovly.addEventListener("mousedown",hdown,true);
+                hovly.addEventListener("mousemove",hmove,true);
+                hovly.addEventListener("mouseup",hup,true);
+                hovly.addEventListener("mouseout",hup,true);
+                main.addEventListener("mousedown",mdown,true);
+                main.addEventListener("mousemove",mmove,true);
+                main.addEventListener("mouseup",mup,true);
+                main.addEventListener("mouseout",mup,true);
+                main.addEventListener("wheel",mwheel,true);
+            }
+            
+            function changemod(event){
+                activeviews.coronal.active=activeviews.horizontal.active=activeviews.main.active=activeviews.sagittal.active=false;
+                activeviews=viewsets[event.target.value];
+//                console.log(event);
+                activeviews.coronal.active=activeviews.horizontal.active=activeviews.main.active=activeviews.sagittal.active=true;
+                redrawall();
+            }
+        </script>
+    </head>
+    <body onload="startup()">
+        <select id="mods" onchange="changemod(event)">
+        </select>
+        <br>
+        <canvas id="main"></canvas>
+        <canvas id="sagittal"></canvas>
+        <canvas id="coronal"></canvas>
+        <canvas id="horizontal"></canvas>
+        <canvas id="sovly"></canvas>
+        <canvas id="covly"></canvas>
+        <canvas id="hovly"></canvas>
+    </body>
+</html>
