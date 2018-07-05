@@ -10,6 +10,7 @@
         </style>
         <script src="bitmapHelpers.js"></script>
         <script src="mouseActions.js"></script>
+        <script src="WHS_Rat_v2.js"></script>
         <script>
             var props={
                 tech:{
@@ -37,6 +38,11 @@
                         name:"DTI",
                         type:"colorimage",
                         urlformatter: '"DTI/"+l+"/"+z+"/"+y+"/"+x+".jpg"'
+                    },
+                    {
+                        name:"Segmentation",
+                        type:"idximage",
+                        urlformatter: 'WHSPack.png'
                     }
                 ]
             };
@@ -281,15 +287,15 @@
                 horizontal.style.top=h*2+t+"px";
                 hovly.style.top=h*2+t+"px";
                 
-                function test(canvas,fill){
-                    var ctx=canvas.getContext("2d");
-                    ctx.fillStyle=fill;
-                    ctx.fillRect(0,0,canvas.width,canvas.height);
-                }
-                test(main,"#c0c0c0");
-                test(sagittal,"#ff0000");
-                test(coronal,"#00ff00");
-                test(horizontal,"#0000ff");
+//                function test(canvas,fill){
+//                    var ctx=canvas.getContext("2d");
+//                    ctx.fillStyle=fill;
+//                    ctx.fillRect(0,0,canvas.width,canvas.height);
+//                }
+//                test(main,"#c0c0c0");
+//                test(sagittal,"#ff0000");
+//                test(coronal,"#00ff00");
+//                test(horizontal,"#0000ff");
 
                 cut={
                     cx:volprops.width/2,
@@ -318,6 +324,11 @@
                         worker:"worker24i.js",
                         data1x:putcolordata1x,
                         data2x:putcolordata2x
+                    },
+                    idximage:{
+                        worker:"worker16p.js",
+                        data1x:putidxdata1x,
+                        data2x:putidxdata2x
                     }
                 };
 
@@ -333,7 +344,7 @@
                         var id=event.data.id;
                         if(id==='imgload'){
                             var img=document.createElement("img");
-                            img.onload=function(loadevent){cubeloaded(loadevent,worker,event.data.type);};
+                            img.onload=function(loadevent){cubeloaded(loadevent,worker,event.data.type,event.data.idx);};
         //                    img.onerror=function(){
         //                        console.log("Invalid tile: "+x+","+y+ " "+url);
         //                        cubecomplete(null,null,next);
@@ -352,7 +363,8 @@
                     var sview=new View(mod.name+'sagittal',sagittal.getContext("2d"),worker,magic.data1x);
                     var cview=new View(mod.name+'coronal',coronal.getContext("2d"),worker,magic.data1x);
                     var hview=new View(mod.name+'horizontal',horizontal.getContext("2d"),worker,magic.data1x);
-                    var mview=new View2x(mod.name+'main',main.getContext("2d"),worker,magic.data2x);
+//                    var mview=new View2x(mod.name+'main',main.getContext("2d"),worker,magic.data2x);
+                    var mview=new View(mod.name+'main',main.getContext("2d"),worker,magic.data1x);
                     
                     views[sview.id]=sview;
                     views[cview.id]=cview;

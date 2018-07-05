@@ -21,17 +21,39 @@ onmessage = function(event) {
             registerview(event.data.view);
             break;
         case "draw":
-            var view = views[event.data.id];
+            var view = viewmap[event.data.id];
             view.cut = event.data.cut;
-            draw(view);
+            scheduledraw(view);
             break;
         case "imgloaded":
-            loaded(event.data.data);
+            loaded(event.data.idx,event.data.data);
             break;
         default:
             close();
     }
 };
+
+var redrawlist=[];
+var redrawmap={};
+var redrawing=false;
+
+function scheduledraw(view){
+    if(!redrawmap[view.id]){
+        redrawmap[view.id]=true;
+        redrawlist.push(view);
+    }
+    if(!redrawing){
+        redrawing=true;
+        setTimeout(redraw,0);
+    }
+}
+
+function redraw(){
+    redrawing=false;
+    redrawlist.forEach(draw);
+    redrawmap={};
+    redrawlist.length=0;
+}
 
 function registerprops(dataprops) {
     xdim = dataprops.xdim;
@@ -40,23 +62,27 @@ function registerprops(dataprops) {
     maxlevel = dataprops.maxlevel;
     urlformatter = new Function("l,x,y,z","return "+dataprops.urlformatter);
 
-    xcubs = Math.floor(xdim / edge) + 1;
-    ycubs = Math.floor(ydim / edge) + 1;
-    zcubs = Math.floor(zdim / edge) + 1;
+    xcubs = Math.floor((xdim+edge-1)/edge);
+    ycubs = Math.floor((ydim+edge-1)/edge);
+    zcubs = Math.floor((zdim+edge-1)/edge);
     xy = xcubs * ycubs;
     xyz = xy * zcubs;
 }
 
-var views = {};
+var viewmap = {};
+var viewlist = [];
 function View(id, width, height) {
     this.id = id;
     this.width = width;
     this.height = height;
     this.data = new Uint8Array(width * height);
     this.cut = null;
+    this.waitmap = [];
 }
 function registerview(descriptor) {
-    views[descriptor.id] = new View(descriptor.id, descriptor.width, descriptor.height);
+    var view = new View(descriptor.id, descriptor.width, descriptor.height);
+    viewmap[descriptor.id] = view;
+    viewlist.push(view);
 }
 
 var cubs = [];
@@ -101,8 +127,7 @@ function draw(view) {
         fbv /= 2;
         fblevel++;
     }
-    var loadissued = false;
-    var fbloadissued = false;
+    var waitmap=[];//,loadlist=[],fblist=[];
     var idx = 0;
     for (var y = 0; y < h; y++)
         for (var x = 0; x < w; x++) {
@@ -118,10 +143,11 @@ function draw(view) {
                 lx >>= shift;
                 ly >>= shift;
                 lz >>= shift;
-                var vol = cubs[level * xyz + lz * xy + ly * xcubs + lx];
-                if (!vol && !loadissued) { //!!
-                    requestload(view, false, level, lx, ly, lz);
-                    loadissued = true;
+                var loadidx = level * xyz + lz * xy + ly * xcubs + lx;
+                var vol = cubs[loadidx];
+                if(!vol  && !waitmap[loadidx]) {
+                    waitmap[loadidx]=true;
+                    tryload(loadidx,2,level,lx,ly,lz);
                 }
                 if (!vol && level < fblevel) {
                     var fl = level;
@@ -133,11 +159,14 @@ function draw(view) {
                         lx >>= 1;
                         ly >>= 1;
                         lz >>= 1;
-                        vol = cubs[fl * xyz + lz * xy + ly * xcubs + lx];
-                    } while (!vol && fl < fblevel);
-                    if (!vol && !fbloadissued) {
-                        requestload(view, true, fl, lx, ly, lz);
-                        fbloadissued = true;
+                        loadidx = fl * xyz + lz * xy + ly * xcubs + lx;
+                        vol = cubs[loadidx];
+                        var cont=!vol && fl < fblevel;
+                        if(cont && !waitmap[loadidx])waitmap[loadidx]=true;
+                    } while (cont);
+                    if (!vol && !waitmap[loadidx]) {
+                        waitmap[loadidx]=true;
+                        tryload(loadidx,1,fblevel,lx,ly,lz);
                     }
                 }
                 if (!vol) {
@@ -147,95 +176,27 @@ function draw(view) {
                 }
             }
         }
-//    postMessage({id:view.id,imagedata:view.imagedata});
-    postMessage({id: view.id, view: view});
+    postMessage({id: view.id, view: {width:view.width,height:view.height,data:view.data}});
+    view.waitmap=waitmap;
 }
 
-var loadlist = [];
-function QItem(level, x, y, z) {
-    this.fb = false;
-    this.l = level;
-    this.x = x;
-    this.y = y;
-    this.z = z;
-    this.subs = {};
+var loadmap=[];
+function tryload(idx,priority,level,x,y,z) {
+    if(!loadmap[idx] || loadmap[idx]>priority) {
+        loadmap[idx]=priority;
+        postMessage({
+            id: 'imgload',
+            type: 'gray',
+            idx: idx,
+            priority: priority,
+            url: urlformatter(level,x,y,z)
+        });
+    }
 }
 
-function requestload(view, fb, level, x, y, z) {
-    var item = null;
-    for (var i = 0; i < loadlist.length; i++) {
-        item = loadlist[i];
-        if (item.l === level && item.x === x && item.y === y && item.z === z)
-            break;
-        else
-            item = null;
-    }
-    if (!item) {
-        item = new QItem(level, x, y, z);
-        loadlist.push(item);
-    }
-    item.fb |= fb;
-    item.subs[view.id] = {view: view, cut: view.cut};
-    tryload();
-}
-
-var loadidx = -1;
-function tryload() {
-    if (loadidx !== -1)
-        return;
-//    if(loadlist.length===0)return;
-    while (loadlist.length > 0) {
-        var item = loadlist[0];
-        var keep = false;
-        for (var s in item.subs) {
-            var i = item.subs[s];
-            if (i.view.cut === i.cut) {
-                keep = true;
-                break;
-            }
-        }
-        if (!keep)
-            loadlist.shift();//console.log("Drop: "+loadlist.shift());
-        else
-            break;
-    }
-    if (loadlist.length === 0)
-        return;
-    for (loadidx = 0; loadidx < loadlist.length; loadidx++)
-        if (loadlist[loadidx].fb) {
-            load();
-            return;
-        }
-    loadidx = 0;
-    load();
-}
-
-function load() {
-    var item = loadlist[loadidx];
-    postMessage({
-        id: 'imgload',
-        type: 'gray',
-        url: urlformatter(item.l,item.x,item.y,item.z)
-    });
-}
-
-function loaded(data) {
-    var item = loadlist[loadidx];
-    cubs[item.l * xyz + item.z * xy + item.y * xcubs + item.x] = new Uint8Array(data);
-
-    while (loadidx < loadlist.length - 1) {
-        loadlist[loadidx] = loadlist[loadidx + 1];
-        loadidx++;
-    }
-    loadidx = -1;
-    loadlist.pop();
-
-    tryload();
-
-    for (var s in item.subs) {
-        var i = item.subs[s];
-        if (i.view.cut === i.cut)
-            draw(i.view);
-    }
-    tryload();
+function loaded(idx,data) {
+    cubs[idx] = new Uint8Array(data);
+    for(var i=0;i<viewlist.length;i++)
+        if(viewlist[i].waitmap[idx])
+            scheduledraw(viewlist[i]);
 }
